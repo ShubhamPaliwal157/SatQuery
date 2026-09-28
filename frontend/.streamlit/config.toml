@@ -1,0 +1,21 @@
+# Single source of truth for the app's color palette. This is the actual
+# fix for the "sidebar is white while the rest of the app is dark" bug:
+# that happened because the old custom CSS hardcoded a light background
+# onto the sidebar regardless of which theme Streamlit's own chrome was
+# using. Setting a theme here means EVERY native widget — sidebar, file
+# uploader, chat input, buttons, expanders — is dark and consistent
+# automatically, in every browser, regardless of the viewer's OS/browser
+# light-dark preference. The custom CSS in app.py only adds project-
+# specific components (cards, bars, ring) on top of this and reads its
+# own color variables from the same palette below — keep them in sync
+# if you ever change one.
+[theme]
+base = "dark"
+primaryColor = "#2563eb"
+backgroundColor = "#0b0d12"
+secondaryBackgroundColor = "#171a21"
+textColor = "#e8e9ec"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

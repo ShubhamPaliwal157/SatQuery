@@ -1,0 +1,366 @@
+# SatQuery AI — Session Handoff Summary
+
+Project: **SatQuery AI**, built for SIH problem statement **SIH26167**
+("Interactive Vision-Language Assistant for Multimodal Remote Sensing
+Image Analysis through Text Queries"). Being built **top-down**: each
+step is a complete, runnable app; later steps add on top without
+rewrites.
+
+## Where things stand: Step 3 complete (not yet manually re-tested)
+
+### Step 1 (MVP) / Step 2 — see README for full detail
+Single image upload + free-text query → router picks caption/vqa/classify
+→ BLIP or RemoteCLIP answers → Streamlit shows the answer + evidence
+trace. Step 2 added RemoteCLIP scene classification, robust GeoTIFF
+loading via rasterio, calibrated 3-tier routing, and a `/warmup` endpoint.
+
+### Step 3 (current)
+Built on top of Step 2 without changing `/analyze`'s contract:
+
+- **New endpoint `POST /analyze-change`** — real bi-temporal change
+  detection (`backend/models/change_detector.py`). Before/after images
+  are co-registered (ORB + RANSAC homography), diffed via SSIM into a
+  binary change mask, and connected-components turns that into ranked
+  regions with bounding boxes. Regions can optionally be labeled with
+  the existing RemoteCLIP classifier on both frames. Every metric is
+  deterministic math — the design note at the top of that file explains
+  why the classifier is only ever allowed to *describe* an already-found
+  region, never to invent whether something counts as change or how big
+  it is. A `needs_human_review` flag fires when registration confidence
+  is low or dissimilarity is extreme.
+- **New module `backend/audit.py`** — SHA-256 hash-chained audit ledger.
+  Every `/analyze` and `/analyze-change` call gets appended; each
+  record's hash covers the previous record's hash, so tampering with any
+  past entry is detectable via `GET /audit/verify`, which recomputes the
+  whole chain from genesis. `GET /audit/recent` lists entries. Only an
+  image fingerprint (SHA-256 of the raw bytes) is stored, not the image.
+- **Frontend rebuilt** (`frontend/app.py`) around a chat-style layout
+  with three sidebar views: Analyze (chat-style single-image Q&A, image
+  persists across follow-up questions instead of re-uploading each time),
+  Compare (the new change-detection flow — dual upload, metric cards,
+  heatmap, region list), and Audit Trail (verify button + recent ledger
+  entries). Custom CSS quiets down Streamlit's default chrome.
+- **Router messaging update** — a single-image query that reads like
+  change detection now points the user at the Compare tab /
+  `/analyze-change` instead of the old "not built until Step 3" note,
+  since it's real now (just needs a second image, which `/analyze`'s
+  contract can't carry).
+
+### Step 3.1 (same session, UI follow-up)
+
+Feedback was: sidebar felt cluttered, chat didn't persist history, emoji
+icons looked wrong for the tool, and the change-detection output wasn't
+visual enough. Addressed all four without touching any backend contract:
+
+- Sidebar rebuilt with a real chat-history list (multiple saved
+  conversations, switch/delete), using Streamlit's `:material/name:`
+  Material Symbols shortcode icons throughout instead of emoji, plus a
+  runtime-generated flat PNG favicon (Pillow: rounded square + ring +
+  node) instead of an emoji page icon.
+- `change_detector.py`'s heatmap now has numbered boxes drawn directly
+  onto it (OpenCV `rectangle`/`putText`), matching the numbering in the
+  region list — verified visually against the same synthetic test pair
+  used for Step 3 (region 1 correctly boxed at the injected-change
+  location).
+- Added a flat SVG confidence ring, flat CSS bar charts for classify
+  scores, and a 5-step pipeline-status strip (align/diff/regions/review/
+  audit) to the Analyze and Compare views.
+- `frontend/app.py`'s new pure-logic pieces (favicon generator, HTML
+  builders for the bars/ring, pipeline-status renderer, chat-history
+  session-state helpers) were smoke-tested against a hand-written stub
+  of the `streamlit` module — module imports cleanly, all three views
+  run without exceptions, generated HTML/SVG is well-formed. Still not
+  verified in an actual browser.
+
+## Step 3.2 (same session, theme fix + demo mode + map + overview)
+
+Reported after actually opening Step 3.1 in a browser: sidebar rendered
+with a hardcoded light background while the rest of the app was dark, and
+several buttons had no explicit width so they didn't line up. Fixed at
+the root rather than patched:
+
+- Added `frontend/.streamlit/config.toml` (explicit dark theme) — every
+  native widget is dark by construction now, not by a pile of CSS
+  overrides that only touched some elements. Removed the CSS rule that
+  hardcoded the sidebar's light background.
+- Every button that should line up now sets `use_container_width=True`
+  in Python; the one intentionally-small button (per-chat delete "×")
+  sits in a narrow column on purpose.
+- Bundled demo scenes (`frontend/demo_assets/`, generated by
+  `tools/generate_demo_assets.py`, procedurally drawn — no internet or
+  copyright dependency): a georeferenced farmland scene, a non-
+  georeferenced coastal urban scene, and a before/after "vacant lot →
+  new construction" pair. One-click load buttons in Analyze and
+  Compare. The before/after pair was run through the real
+  `change_detector.py` — SSIM 0.729, correctly boxed the new building.
+- Example-query chips on a fresh Analyze conversation, sharing one new
+  `submit_query()` helper with the real chat input (also de-duplicated
+  turn-handling logic that used to live only inline).
+- New **Map** view: `image_utils.py` now extracts real geo bounds
+  (rasterio, reprojected to EPSG:4326) when a GeoTIFF has a CRS,
+  returned from `/analyze` as `geo_bounds`/`crs`. Shown on a Leaflet/
+  OpenStreetMap panel; a plain JPEG/PNG gets an honest "no location
+  data" empty state instead of a guess.
+- New **Overview** view: a plain Done-vs-Roadmap coverage table so the
+  app states its own scope honestly on the landing screen.
+
+**Verified this pass:** every changed file passes a syntax compile
+check. `change_detector.py` was re-run directly against the new demo
+before/after pair (see above). The full frontend — all five views, the
+demo-scene buttons, the example chips, a full Compare run through to a
+rendered result, both Map states, and the audit verify button — was
+exercised with Streamlit's real `streamlit.testing.v1.AppTest` harness
+(`requests` mocked, no backend needed to run it): zero exceptions
+anywhere. **Not yet verified:** exact visual polish in a real browser —
+AppTest confirms the script runs correctly and renders the right
+components, not pixel-level spacing/color, though the theme is now
+Streamlit's own config mechanism rather than ad-hoc CSS, which is a much
+smaller surface for anything to drift on.
+
+## Analyst-grade build plan (started after Step 3.4) — 7 steps, 2 done
+
+Goal: turn the app into what professional satellite analysts actually use —
+real multi-band/SAR/DEM data the user drops in a folder, a swipe canvas
+(raw image on one side, any analysis layer on the other), evidence boxes
+drawn on the raw image, 3D where it makes sense — all driven by the chatbot.
+Research and reasoning behind this are in the chat that produced it; the
+design in one line: **scene bundle → analysis tools → layers + evidence
+objects → canvas <-> chat.** Every analysis returns *layers* (rasters with a
+colormap/legend) and *evidence objects* (id, geometry, label, score, source
+tool, metrics with units, rationale). Numbers always come from tool output,
+never from a language model.
+
+Steps 3-16 of the original plan were condensed into 5 bigger steps (mapping in the
+last column). A big step may not fit in one run's tool budget; if it stops part-way, the
+run must record the exact checkpoint (what is finished, what is not) right here so the next
+run resumes instead of restarting. Every checkpoint must leave the app working.
+Status: DONE / NEXT / todo.
+
+| # | Step | Old # | Status |
+|---|------|-------|--------|
+| 1 | Scene registry: `data/` folder convention, `backend/scenes.py`, capability gating, `/scenes` endpoints, tests | 1 | **DONE** |
+| 2 | Ingest tool: `data/inbox/` raw downloads -> normalised bundle (one AOI grid, validation report) | 2 | **DONE** (needs a run on real data, see `data/DOWNLOAD_GUIDE.md`) |
+| 3 | **Layers + Scenes view.** `backend/layers.py`: Layer and Evidence schema, colormap -> PNG renderer; layers true-colour, NDVI, NDWI/MNDWI, NBR/dNBR, NDBI, cloud mask (SCL), SAR linear -> dB. Must detect and record scaling: Browser float reflectance (0-1) vs integer DN (x10000, baseline N0400+ has a -1000 offset), SAR linear vs dB. Area in ha from the CRS pixel size (UTM metres exact; degrees approximate, say so). `GET /scenes/{id}/layer`. New "Scenes" nav view: pick scene / date / layer, preview, capability list with the `requires` text. **You will see:** your real Indian imagery and NDVI in the app. | 3+4 | **NEXT** |
+| 4 | **The canvas.** Self-contained HTML/JS viewer: draggable vertical swipe bar (raw image one side, any layer the other), layer dropdown, opacity, zoom/pan, legend, scale bar, coordinates, pixel inspector (spectral profile). Evidence boxes from masks (connected components, area in ha) with hover details. Bidirectional component: click a box -> region question to chat; chat cites [E3] -> canvas highlights it. | 5+6+7 | todo |
+| 5 | **Analysis engine + chat.** Tool registry, entity extraction (dates, index names, regions), capability-gated honest refusals, dialogue state, analysis cards in chat. SAR flood pipeline (dB, speckle filter, log-ratio change, threshold, DEM and permanent-water exclusion). Optical change detection on scenes (index differencing, area stats). Classification: k-means and supervised random forest with confusion matrix / OA / kappa. | 8+9+10 | todo |
+| 6 | **Advanced views.** Tile-wise RemoteCLIP class map and text-query similarity heatmap (labelled "approximate"); detection/grounding with boxes tagged "model-proposed, unverified"; 3D terrain (Plotly surface, flood on terrain); time-lapse slider and pixel time-series chart. | 11+12+13+14 | todo |
+| 7 | **Reports + hardening.** Annotated PNG, GeoJSON/GeoTIFF export, PDF case file (method, assumptions, evidence, audit hash); tiling/COG for big rasters, caching, error handling, deploy notes. | 15+16 | todo |
+
+Known technical risk (step 4): `st.iframe` only pushes data one way, so
+click-to-chat needs a real bidirectional Streamlit component — check the
+current component API docs first, it has been changing. Fallback if
+Streamlit can't carry the interactivity: a React frontend.
+
+### Demo data: India, downloaded by the user (guide written, downloads NOT done yet)
+
+The user has no data yet and is not a remote-sensing expert, so `data/DOWNLOAD_GUIDE.md`
+walks through the Copernicus Browser (browser.dataspace.copernicus.eu) step by step. Decisions:
+Analytical download, one .tiff per band, **TIFF 32-bit float** (16-bit acceptable, never 8-bit), 10 m,
+UTM coordinate system where offered, one drawn ~10 x 10 km rectangle per area, one date folder per
+acquisition under `data/inbox/<aoi>/YYYY-MM-DD/`, then `tools/ingest_scene.py <aoi> --inbox
+data/inbox/<aoi>`. Areas, in order: (1) `navi_mumbai_urban_growth` (Sentinel-2, Feb 2019 vs Feb 2025),
+(2) `chennai_flood_2023` (Sentinel-1 VV+VH before/after Cyclone Michaung, same orbit, + DEM),
+(3) `punjab_crop_cycle` (Sentinel-2, 5-6 dates Nov 2025-Apr 2026), (4, optional) `munnar_terrain`
+(DEM + one Sentinel-2 date). Bounding boxes and dates were chosen from general knowledge, not checked
+against the archive: the guide tells the user to verify the preview and to report back if there is no
+usable Sentinel-1 pair. The Browser's exact menu wording and its export file names are also from
+memory; the ingest tool already parses names like `..._VV_(Raw)`, but real Browser exports are untested.
+
+### Step 1 — what was done (previous run)
+
+- `backend/scenes.py` — scans `data/aois/<slug>/`, reads only file names and
+  raster headers (fast), and computes a capability map: 15 analyses, each
+  with `available`, a label, and a plain-language `requires` string
+  (e.g. NDVI -> "B04 + B08"; flood extent -> "VV on two dates"). The
+  chatbot will use `requires` to refuse honestly instead of guessing.
+  Also reports per-acquisition grid info (CRS, size, pixel size, WGS84
+  bounds), mixed-grid flags, and warnings for unrecognised file/folder
+  names. Scene ids are validated to block path traversal; folders starting
+  with `_` or `.` are ignored.
+- `backend/main.py` — three new routes: `GET /scenes` (summaries),
+  `GET /scenes/{id}` (full detail + capabilities + warnings),
+  `GET /quicklooks` (single-image files). Existing routes untouched.
+- `data/` skeleton — `inbox/`, `quicklooks/`, `aois/_template/aoi.json`, and
+  `data/README.md` (the exact folder layout, file naming rules, and a
+  table of which files unlock which analyses). `.gitignore` now keeps the
+  folders but not the big rasters.
+- `tools/check_scenes.py` — prints what the app sees under `data/aois`
+  (CAN DO / MISSING / warnings) without starting the backend.
+- `backend/tests/test_scenes.py` — 6 unit tests (capabilities from real
+  files, warnings, header/bounds reading, path-traversal rejection, empty
+  root). Run from `backend/`: `python -m unittest tests.test_scenes -v`.
+
+**Verified this step:** all 6 tests pass; the three endpoints were also
+exercised through FastAPI's TestClient against a generated scene (200s for
+valid ids, 404 for unknown/private ids) with the ML modules stubbed, since
+model weights can't be downloaded in the build sandbox. **Not verified:**
+nothing in this step touches the UI or the models, so there is nothing to
+look at in the browser yet — the first visible result is step 4.
+
+### Step 2 — what was done (this run): ingest tool
+
+`python tools/ingest_scene.py <aoi> [--dry-run] [--bbox W S E N] [--date YYYY-MM-DD] [--overwrite]`
+reads `data/inbox/` and builds `data/aois/<aoi>/` in the convention `scenes.py` expects.
+Logic lives in `backend/ingest.py` (CLI is a thin wrapper); tests in `backend/tests/test_ingest.py`.
+
+- **Recognition by file name, folder layout irrelevant:** Sentinel-2 L2A `.SAFE` trees (R10m/R20m/R60m),
+  Copernicus-Browser-style names, loose `B04.tif` / `VV.tif` / `dem.tif`. Band = last band token in the
+  name; date = file name first, then folders nearest-first (so the sensing date in a Sentinel-2 file name
+  beats the processing date in its folder), `--date` only as fallback. Unrecognised files, zips, TCI/AOT/WVP
+  etc. are *reported grouped by reason*, never silently dropped.
+- **Finest copy of each band wins** (10 m over 20 m over 60 m); same-resolution duplicates warn (no mosaicking).
+- **One grid for the whole AOI (decision — differs from the earlier "one grid per acquisition" note):**
+  reference = finest optical raster (SAR/DEM only if there is no optical), clipped to the area every
+  acquisition covers and to `--bbox`, snapped inward onto the reference pixel lattice. Stored in
+  `ingest_manifest.json`; later runs align new data to the *stored* grid. Why: change detection, time
+  series, index maths across dates and the optical/SAR swipe become pixel-for-pixel with no per-analysis
+  co-registration. Cost: SAR and DEM are resampled onto the optical grid.
+- **Resampling:** SCL nearest; bilinear when upsampling or equal size; average when the source is finer than
+  the grid. Values copied as delivered (no DN->reflectance, no linear->dB). Integer bands without a
+  declared nodata get nodata 0 (Sentinel-2 convention); floats get NaN.
+- **Refuses/skips with a reason:** multi-band files, non-georeferenced files (raw Sentinel-1 GRD
+  `measurement/*.tiff` are radar geometry), rotated grids, acquisitions with <5% overlap with the reference,
+  zip archives, an AOI that already holds hand-placed data with no manifest, grids over `--max-pixels`
+  (default 25 M; use `--bbox`). Warns on partial overlap, DEM not covering the grid, mostly-nodata output,
+  Level-1C input.
+- **Safe writes:** each raster is written to `*.part` then `os.replace`d; inbox is never modified;
+  re-running keeps existing files unless `--overwrite`.
+- **Report** (ASCII only, so Windows consoles cope): grid, placed files grouped by date/kind with what was
+  resampled, skipped files by reason, warnings, and *analyses newly unlocked* — computed with the real
+  `scenes.compute_capabilities` rules (a test proves the projection equals a real rescan).
+
+**Verified this run (in the sandbox):** 40 tests pass using a fake raster backend — name/date recognition
+(incl. the SAFE processing-date trap and dual-pol S1 names), finest-copy selection, inward grid snapping,
+overlap drop/warn, bbox clipping, stored-grid reuse on a later run, dry run writes nothing, re-run
+idempotence, `--overwrite`, hand-placed-data refusal, per-file failure isolation, ASCII report. Mutation
+checks (snap outward, SCL bilinear, keep coarser copy) each make tests fail. The report text was read
+end-to-end and that exposed and fixed three bugs (exponent-formatted coordinates, ambiguous `B04.tif`
+labels, misleading inbox line).
+
+**NOT verified — needs your machine:** everything that touches GDAL. `RasterioBackend` (header read,
+`reproject`, GeoTIFF write, `transform_bounds`) has never been executed: rasterio cannot be installed in
+the build sandbox. Three integration tests in `test_ingest.py::RasterioIntegration` (10/20 m bands, SCL
+class codes, SAR on an offset grid, a DEM in EPSG:4326, rescan through `scenes.py`) skip here and will run
+where rasterio is installed. `tests/test_scenes.py` also imports rasterio at the top, so it could not be
+run here either. The file-name conventions for Copernicus Browser exports and the SAFE layout were written
+from knowledge of those products and have not been tried on real downloads; reading `.jp2` needs a GDAL
+build with OpenJPEG (rasterio wheels normally include it).
+
+**First thing to do on your machine:**
+`cd backend && python -m unittest tests.test_scenes tests.test_ingest -v` (expect 0 skips), then
+`python tools/ingest_scene.py <aoi> --dry-run` on one real download, and read the report before running
+it for real.
+
+## Environment constraint carried over from Step 2 (unchanged)
+
+This build environment still has no live internet access — can't
+`pip install fastapi/torch/streamlit` or download HF weights here. So
+Step 3, like Step 2, could only be verified in the pieces that don't
+need those:
+
+- All files pass a syntax compile check.
+- `change_detector.py` was run directly (not through the API) against
+  synthetic NumPy image pairs: confirmed it corrects a deliberate pixel
+  shift, correctly boxes an injected change region at the right
+  location/size, wires a stub classifier into region labels correctly,
+  and degrades to `aligned=False` + `needs_human_review=True` (instead
+  of crashing) on a pair of flat images with too few ORB keypoints.
+- `audit.py` was run directly: appended records, confirmed
+  `verify_chain()` reports valid, then hand-tampered one record's
+  `answer` field in the ledger file on disk and confirmed
+  `verify_chain()` correctly reports exactly which record broke.
+
+**Not yet verified** — needs your machine (same as Step 2 was): the new
+endpoints over real HTTP, the classifier wired to real RemoteCLIP weights
+on real change regions, and the rebuilt Streamlit UI in an actual browser
+(chat history state across turns, the Compare tab's layout, image
+uploaders).
+
+## Manual test plan for next session
+
+1. Re-confirm Step 2's existing manual tests still pass (nothing in
+   `/analyze`'s code path changed, but the router messaging and main.py
+   were both touched, so worth a quick re-check).
+2. `/analyze-change`: run two photos of the same scene a few minutes
+   apart (or any "before/after" pair) through the Compare tab. Expect a
+   heatmap, an SSIM score, and at least one boxed region. Run the *same*
+   image as both before and after as a sanity check — SSIM should be
+   near 1.0, changed-area near 0%.
+3. Audit trail: run a few queries, open the Audit Trail tab, click
+   "Verify chain integrity" (should say intact). Then manually edit one
+   character in `backend/data/audit_ledger.jsonl`'s `"answer"` field and
+   verify again — should report the tamper.
+4. Try the new chat-style Analyze flow: upload once, ask two or three
+   follow-up questions without re-uploading, confirm the image persists
+   and each turn renders as a chat bubble with its own evidence trace.
+5. **Step 3.2, do this first — it's the fast one:** just run
+   `streamlit run app.py` and look at it. The theme/button-width fixes
+   were verified with `AppTest` (confirms the script runs correctly and
+   the right components render) but never actually rendered in a real
+   browser — that 30-second look is the one thing this pass couldn't
+   do here. Click each of the five nav buttons, load a demo scene in
+   Analyze, load the demo pair in Compare, check the Map tab both with
+   and without a georeferenced image loaded.
+
+## Project layout
+
+```
+satquery-mvp/
+├── backend/
+│   ├── main.py             # FastAPI orchestrator — /analyze, /analyze-change,
+│   │                        #   /warmup, /health, /audit/recent, /audit/verify
+│   ├── router.py            # Query intent routing (calibrated fallback chain)
+│   ├── image_utils.py       # Robust image loading — GeoTIFF/multi-band/16-bit aware
+│   ├── audit.py             # SHA-256 hash-chained audit ledger (NEW — Step 3)
+│   ├── scenes.py            # Scene registry + capability gating (NEW — build-plan step 1)
+│   ├── ingest.py            # Inbox -> one-grid AOI bundle + report (NEW — build-plan step 2)
+│   ├── tests/test_scenes.py # Unit tests for the registry
+│   ├── tests/test_ingest.py # Ingest tests (fake backend + rasterio integration)
+│   ├── models/
+│   │   ├── captioner.py         # BLIP caption + VQA specialist
+│   │   ├── classifier.py        # RemoteCLIP zero-shot scene classifier
+│   │   └── change_detector.py   # Bi-temporal change detection (NEW — Step 3)
+│   ├── data/                 # audit_ledger.jsonl written here at runtime
+│   └── requirements.txt
+├── frontend/
+│   ├── .streamlit/config.toml # Dark theme (NEW — Step 3.2, fixes the sidebar bug)
+│   ├── app.py               # Streamlit UI — Overview/Analyze/Compare/Map/Audit trail
+│   ├── demo_assets/          # Bundled demo scenes (NEW — Step 3.2, pre-generated)
+│   └── requirements.txt
+├── tools/
+│   ├── make_test_geotiff.py
+│   ├── generate_demo_assets.py  # Regenerates frontend/demo_assets/ (NEW — Step 3.2)
+│   ├── check_scenes.py      # Prints what the app sees under data/aois (NEW — plan step 1)
+│   └── ingest_scene.py      # CLI for ingest.py (NEW — plan step 2)
+├── data/                    # YOUR real satellite data (NEW — plan step 1, see data/README.md)
+│   ├── inbox/  quicklooks/  aois/_template/
+└── README.md                # Full detail on all steps, setup instructions
+```
+
+## Roadmap — not yet built
+
+4. Optical + SAR fusion (two-branch CNN, optional SAR band on `/analyze`)
+5. A CesiumJS 3D globe, if there's appetite for a React/TypeScript
+   frontend alongside (or instead of) the current Streamlit one — the
+   Step 3.2 Leaflet map already covers the geolocated-footprint need on
+   the current stack, so this is now purely a "want the 3D showpiece"
+   call, not a functionality gap.
+6. Deploy to a public URL (HuggingFace Spaces / Render / Vercel); W&B
+   tracking for any Colab fine-tuning
+
+## For the next session
+
+Pick up with **step 3 of the condensed plan** (Layers + Scenes view: `backend/layers.py`, `/scenes/{id}/layer`,
+the "Scenes" nav view). First read what the user reports from running the ingest tool on real downloads
+(`data/DOWNLOAD_GUIDE.md`) and fix any ingest problems before building on it. Carried open items:
+
+(a) The ingest tool has never run against real GDAL or real downloads — do the "first thing to do on your
+machine" above before trusting it; fix whatever the integration tests or a real `--dry-run` turn up.
+(b) The 30-second real-browser look from the Step 3.2 manual test plan, and whether the sidebar re-open
+arrow now shows (step 3.4 removed all header/toolbar overrides; if it is still missing, add a custom
+in-app sidebar toggle button).
+(c) Decisions step 3 must make because ingest deliberately copies raw values: **Sentinel-2 L2A scaling**
+(DN vs reflectance; processing baseline N0400 or later carries a -1000 offset — the baseline is in the SAFE
+folder name, which the manifest keeps in each file's `source`) and **SAR units** (linear vs dB — unknown
+after ingest; step 9 owns the conversion). Layers must state what they assumed.
+(d) The earlier "Optical + SAR fusion" roadmap item is folded into condensed steps 5 and 6.

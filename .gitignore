@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Local audit ledger — generated at runtime, not source
+backend/data/*.jsonl
+
+# Model weight caches if ever pointed at a local dir
+*.pt
+*.pth
+
+# Real satellite data: too big for git. Keep the folders, not the rasters.
+data/inbox/*
+!data/inbox/.gitkeep
+data/aois/**/*.tif
+data/aois/**/*.tiff
+data/quicklooks/*
+!data/quicklooks/.gitkeep

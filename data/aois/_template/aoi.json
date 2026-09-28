@@ -1,0 +1,6 @@
+{
+  "title": "Human-readable name, e.g. Beira coastal flood, March 2019",
+  "place": "City / region, country",
+  "event": "flood | urban growth | crop cycle | burn scar | terrain | other",
+  "notes": "Sensor, processing level, source and licence/attribution text."
+}
